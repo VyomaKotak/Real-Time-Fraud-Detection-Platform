@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Central configuration for the Real-Time Fraud Detection Platform.
+# Values can be overridden with environment variables (see src/config.py).
+# ---------------------------------------------------------------------------
+
+data:
+  # Local path to the PaySim CSV. If missing, a synthetic PaySim-like dataset
+  # is generated automatically (see src/data/generate_synthetic.py).
+  raw_path: data/paysim.csv
+  # Kaggle dataset slug used by scripts/download_data.py (requires Kaggle API).
+  kaggle_dataset: ealaxi/paysim1
+  synthetic_rows: 200000
+  test_size: 0.2
+  random_state: 42
+
+features:
+  # Transaction types in PaySim. Fraud only ever occurs in TRANSFER / CASH_OUT.
+  transaction_types:
+    - PAYMENT
+    - TRANSFER
+    - CASH_OUT
+    - CASH_IN
+    - DEBIT
+  # Only these types are scored by the model (the rest are never fraud).
+  scored_types:
+    - TRANSFER
+    - CASH_OUT
+
+model:
+  path: models/fraud_model.joblib
+  metadata_path: models/model_metadata.json
+  algorithm: random_forest        # random_forest | gradient_boosting | xgboost | logistic
+  n_estimators: 200
+  max_depth: 12
+  class_weight: balanced
+  # Probability threshold above which a transaction is flagged as fraud.
+  decision_threshold: 0.5
+
+kafka:
+  bootstrap_servers: localhost:9092
+  input_topic: transactions
+  output_topic: fraud-scores
+  consumer_group: fraud-detector
+  # Transactions per second when replaying data through the producer.
+  produce_rate: 50
+
+spark:
+  app_name: FraudDetectionStreaming
+  checkpoint_dir: checkpoints/fraud
+  output_path: data/scored
+  trigger_interval: "5 seconds"
+  max_offsets_per_trigger: 5000
+
+serving:
+  host: 0.0.0.0
+  port: 8000
+
+dashboard:
+  api_url: http://localhost:8000
+  refresh_seconds: 5
