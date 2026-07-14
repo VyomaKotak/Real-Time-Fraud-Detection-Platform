@@ -6,7 +6,7 @@ Streaming fraud detection on **6.3M real mobile-money transactions**, scored end
 **PR-AUC 0.998** at a 0.13% fraud base rate. 1,638 of 1,643 frauds caught, at a cost of 41 false
 positives across 554,082 held-out transactions.
 
-![Streamlit dashboard streaming monitor](docs/monitor.png)
+![Streamlit dashboard streaming monitor](docs/Monitor.png)
 
 ---
 
