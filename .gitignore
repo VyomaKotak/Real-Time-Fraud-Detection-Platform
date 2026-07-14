@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & models (large artifacts are generated, not committed)
+data/*.csv
+data/*.parquet
+data/*.zip
+models/*.joblib
+models/*.pkl
+models/*.json
+!models/.gitkeep
+!data/.gitkeep
+
+# Spark / streaming state
+checkpoints/
+spark-warehouse/
+data/scored/
+*.crc
+_SUCCESS
+
+# MLflow
+mlruns/
+
+# Logs
+*.log
+logs/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Env
+.env
+
+# Local pipeline run outputs / logs
+run_outputs/
+
+# Notebook-local generated data
+notebooks/data/

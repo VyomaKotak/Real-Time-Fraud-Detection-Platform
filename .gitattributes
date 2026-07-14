@@ -1,0 +1,3 @@
+# Keep shell scripts LF-only so they run inside Linux containers even when the
+# repo is checked out on Windows (CRLF would break the bash shebang line).
+*.sh text eol=lf

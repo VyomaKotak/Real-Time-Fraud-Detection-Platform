@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fraud-detection-platform"
+version = "0.1.0"
+description = "Real-time fraud detection on PaySim: Kafka -> Spark Structured Streaming -> ML model -> FastAPI -> dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Vyoma Kotak", email = "vyomakotak@gmail.com" }]
+keywords = ["fraud-detection", "kafka", "spark", "streaming", "machine-learning", "fastapi"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.3.0",
+    "xgboost>=2.0.0",
+    "joblib>=1.3.0",
+    "pyyaml>=6.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "kafka-python>=2.0.2",
+    # Pinned to 3.5.x: the Kafka connector is published for Scala 2.12 and Spark
+    # 3.5 runs on Java 8/11/17. Spark 4.x switches to Scala 2.13.
+    "pyspark>=3.5.0,<3.6",
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "kaggle>=1.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.27.0",
+    "ruff>=0.4.0",
+    "black>=24.0.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.5.0",
+    # Notebook / EDA
+    "matplotlib>=3.7.0",
+    "jupyter>=1.0.0",
+    "jupytext>=1.16.0",
+]
+
+[project.urls]
+Repository = "https://github.com/VyomaKotak/Real-Time-Fraud-Detection-Platform"
+
+# Console entry points — installed as real commands by `pip install .`.
+[project.scripts]
+fraud-train = "fraud_platform.training.train:main"
+fraud-serve = "fraud_platform.serving.app:main"
+fraud-produce = "fraud_platform.streaming.producer:main"
+fraud-stream = "fraud_platform.streaming.spark_stream:main"
+
+[tool.setuptools.packages.find]
+include = ["fraud_platform*"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+# Notebooks use cell-style mid-file imports and long inline text — exclude them.
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+# Streamlit dashboards run top-to-bottom; imports after the sys.path bootstrap
+# are intentional (E402). __init__ re-exports are intentional (F401).
+per-file-ignores = { "fraud_platform/dashboard/app.py" = ["E402"], "**/__init__.py" = ["F401"], "scripts/*" = ["E402"] }
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.coverage.run]
+source = ["fraud_platform"]
+omit = ["fraud_platform/dashboard/*"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
