@@ -1,17 +1,63 @@
 # Real-Time Fraud Detection Platform
 
-An end-to-end, streaming fraud-detection system built on the **PaySim** mobile-money
-dataset. Transactions flow through **Kafka → Spark Structured Streaming → an ML model →
-a FastAPI scoring service → a live Streamlit dashboard**, mirroring how a bank or fintech
-scores card / transfer activity in real time.
+Streaming fraud detection on **6.3M real mobile-money transactions**, scored end to end through
+**Kafka → Spark Structured Streaming → an ML model → FastAPI → a live dashboard**.
 
-## Dashboard (live streaming results)
+**PR-AUC 0.998** at a 0.13% fraud base rate. 1,638 of 1,643 frauds caught, at a cost of 41 false
+positives across 554,082 held-out transactions.
 
 ![Streamlit dashboard streaming monitor](docs/dashboard.png)
 
-*The "Streaming monitor" tab reading real Spark output: 102,000 transactions scored,
-128 flagged as fraud (0 false positives), fraud volume over time, and the latest alerts.
-Regenerate a fresh HTML results report anytime with `make report`.*
+---
+
+## The problem
+
+Banks score every transaction as it happens. A transfer has to be judged fraudulent or legitimate
+in milliseconds, at thousands per second, and the model has to be good enough that blocking a real
+customer stays rare.
+
+The difficulty is not the classifier. It is that **fraud is 0.129% of transactions** — 8,213 in
+6,362,620. A model that predicts "never fraud" is 99.87% accurate and completely worthless. That
+imbalance shapes every decision in this project, including which metric to report.
+
+## Results (real PaySim, 6,362,620 rows)
+
+| Metric | Value |
+|---|---|
+| **PR-AUC** | **0.9980** |
+| ROC-AUC | 0.9985 |
+| Fraud precision | 0.9756 |
+| Fraud recall | 0.9970 |
+| Fraud F1 | 0.9862 |
+| Train / test rows | 2,216,327 / 554,082 |
+
+**Confusion matrix** (554,082 held-out transactions):
+
+|  | Predicted legit | Predicted fraud |
+|---|---|---|
+| **Actually legit** | 552,398 | 41 |
+| **Actually fraud** | 5 | 1,638 |
+
+**PR-AUC is the headline, not ROC-AUC.** At a 0.13% base rate the true-negative pool is so large
+that false positives barely move the false-positive *rate* — ROC-AUC flatters almost any model on
+data this imbalanced. Precision-recall is the honest measure.
+
+### The tradeoff
+
+Those 41 false positives and 5 false negatives are not a defect. They are a *choice*, made at
+`decision_threshold = 0.5`:
+
+- **41 false positives** = 41 customers whose card is declined at a till. They call the bank.
+- **5 false negatives** = 5 frauds that go through, and are likely reimbursed.
+
+Which error costs more depends on the amounts involved and the price of a support call versus a
+chargeback. A real fraud team tunes that threshold against a cost matrix and revisits it as fraud
+patterns shift. The model does not decide this; the business does. The threshold is exposed in
+`config/config.yaml` for exactly that reason.
+
+---
+
+## Architecture
 
 ```
                  ┌──────────────┐     ┌───────────────────────────┐     ┌─────────────┐
@@ -26,92 +72,88 @@ Regenerate a fresh HTML results report anytime with `make report`.*
                                       │  data/scored/*.pq │ ─────────▶ │             │
                                       └───────────────────┘            └─────────────┘
 
-  FastAPI scoring service (fraud_platform/serving/app.py)  ── same model, same feature code ──┘
+  FastAPI scoring service ── same model, same feature code ──────────────────┘
       POST /score   POST /score/batch   GET /health   GET /model   GET /metrics
 ```
 
-The **same feature-engineering code and the same model wrapper** power both the batch
-Spark scorer and the online FastAPI service, so there is zero train/serve skew.
+**The design decision that matters: one feature module, no train/serve skew.**
+
+Training (pandas, batch), the FastAPI service (single transaction), and the Spark scorer (micro-batch
+`pandas_udf`) all call the same `build_features`. Train/serve skew — where features computed in
+production drift subtly from those computed at training time — is one of the most common and most
+expensive failure modes in deployed ML. Sharing the code path eliminates it structurally rather than
+hoping a test catches it.
+
+**Proof it works:** the streaming run scored 30,000 live transactions and predicted 84 frauds against
+84 actual — 83 true positives, 1 false positive, 1 false negative. The online numbers track the
+offline evaluation.
 
 ---
 
-## Why PaySim
+## The signal: balance-error features
 
-Real fraud data is confidential, so this uses [PaySim](https://www.kaggle.com/datasets/ealaxi/paysim1)
-— a 6.3M-row simulation of mobile-money transactions with labelled fraud. Its key
-dynamics (which the model learns) are:
+Fraud in PaySim has a signature, and finding it is the difference between throwing columns at a
+classifier and understanding the domain.
 
-- Fraud occurs **only** in `TRANSFER` and `CASH_OUT` transactions.
-- Fraudulent transactions **drain the origin account** (`newbalanceOrig == 0`,
-  `amount == oldbalanceOrg`).
-- Genuine transactions obey accounting identities; fraud breaks them — captured by the
-  `errorBalanceOrig` / `errorBalanceDest` features, the strongest signals in the model.
+Genuine transactions obey accounting identities: money out of one account equals money into another.
+Fraud breaks them. So:
 
-**No Kaggle account?** No problem. If `data/paysim.csv` is missing, the platform
-generates a synthetic dataset with the *same schema and fraud dynamics*, so everything
-runs end to end in a fresh clone or in CI.
+```python
+errorBalanceOrig = newbalanceOrig + amount - oldbalanceOrg   # 0 when consistent
+errorBalanceDest = oldbalanceDest + amount - newbalanceDest
+```
 
-### Using the real 6.3M-row PaySim dataset
+The trained model confirms this is where the signal lives:
 
-`scripts/download_data.py` pulls the real dataset from Kaggle when credentials are
-available, and otherwise falls back to synthetic data. To fetch the real data:
+| Feature | Importance |
+|---|---|
+| `errorBalanceOrig` | **0.356** |
+| `amount_to_oldOrg` | 0.274 |
+| `oldbalanceOrg` | 0.117 |
+| `newbalanceOrig` | 0.057 |
+| `newbalanceDest` | 0.049 |
+| `orig_zeroed_out` | 0.048 |
 
-1. Create a Kaggle API token: kaggle.com → *Account* → **Create New API Token**.
-   This downloads `kaggle.json`.
-2. Provide the credentials either way:
-   ```bash
-   mkdir -p ~/.kaggle && mv ~/Downloads/kaggle.json ~/.kaggle/ && chmod 600 ~/.kaggle/kaggle.json
-   # or:
-   export KAGGLE_USERNAME=your_user KAGGLE_KEY=your_key
-   ```
-3. Download:
-   ```bash
-   python scripts/download_data.py --kaggle     # real data only; errors if it can't
-   python scripts/download_data.py              # real if creds present, else synthetic
-   ```
+Over a third of the model's decision comes from a balance identity that should never be violated.
 
-The downloaded CSV is unzipped, its columns validated/normalised
-(`fraud_platform/data/validate.py` handles the `oldbalanceOrg` spelling and stray index columns
-some mirrors add), and saved to `data/paysim.csv`. Then just `make train` as usual —
-the rest of the pipeline is identical.
+Two further domain rules are enforced in code rather than learned:
+
+- **Fraud only ever occurs in `TRANSFER` and `CASH_OUT`.** The other 3.6M transactions are never
+  scored — they cannot be fraud, so troubling the model with them only adds noise.
+- **Fraudsters drain the account.** `amount == oldbalanceOrg`, `newbalanceOrig == 0`.
+
+The raw data shows the attack pattern plainly. Flagged transactions come in pairs at identical
+amounts — a `TRANSFER` out of the victim's account, then an immediate `CASH_OUT`:
+
+| type | amount | fraud_probability |
+|---|---|---|
+| TRANSFER | 1,996.17 | 1.00 |
+| CASH_OUT | 1,996.17 | 1.00 |
+| TRANSFER | 181.00 | 1.00 |
+| CASH_OUT | 181.00 | 1.00 |
 
 ---
-
-## Requirements
-
-- **Python 3.10+** (CI tests 3.10 / 3.11 / 3.12)
-- **Java 8, 11, or 17** — required only for the Spark streaming job. Spark 3.5
-  does **not** support Java 18+ (its Arrow integration crashes `pandas_udf`), so
-  point `JAVA_HOME` at a JDK 17 if your default is newer:
-  ```bash
-  export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-  ```
-  The streaming job logs an actionable warning if it detects an unsupported JDK.
-- **Docker** — for the local Kafka broker (or bring your own broker).
 
 ## Quick start
 
 ```bash
-# 1. Install (editable, with dev tools)
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"       # or: make install
+python -m venv .venv && source .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 
-# 2. Get data (real PaySim via Kaggle if creds present, else synthetic)
-make data                     # == python scripts/download_data.py
+python scripts/download_data.py    # real PaySim via Kaggle, or synthetic fallback
+fraud-train                        # -> models/fraud_model.joblib + metadata
 
-# 3. Train the model
-make train                    # == fraud-train
-#   -> models/fraud_model.joblib + models/model_metadata.json
-
-# 4. Serve it
-make api                      # http://localhost:8000/docs
-
-# 5. Dashboard (new terminal)
-make dashboard                # http://localhost:8501
+uvicorn fraud_platform.serving.app:app --port 8000   # http://localhost:8000/docs
+streamlit run fraud_platform/dashboard/app.py        # http://localhost:8501
 ```
 
-Installing the package also exposes console commands: `fraud-train`,
-`fraud-serve`, `fraud-produce`, `fraud-stream`.
+**The full streaming pipeline**, Kafka and Spark in containers — no local Java needed:
+
+```bash
+docker compose -f docker-compose.streaming.yml up --build
+```
+
+Then open the dashboard's **Streaming monitor** tab.
 
 Score a transaction directly:
 
@@ -121,139 +163,71 @@ curl -X POST http://localhost:8000/score -H 'Content-Type: application/json' -d 
   "oldbalanceOrg": 181000, "newbalanceOrig": 0,
   "oldbalanceDest": 0, "newbalanceDest": 0, "nameDest": "C1666544295"
 }'
-# -> {"fraud_probability": 0.97, "is_fraud": true, "threshold": 0.5, "scored": true}
+# -> {"fraud_probability": 1.0, "is_fraud": true, "threshold": 0.5, "scored": true}
 ```
 
 ---
 
-## Running the streaming pipeline
+## Engineering
 
-### Easiest: one command, all in Docker (recommended, esp. on Windows)
+Not a notebook. A system.
 
-Runs Kafka **and** the Spark scorer inside Linux containers, so you need only
-**Docker Desktop** — no local Java / Spark / `winutils` setup. It produces
-transactions, scores them with Spark, and writes results into `data/scored/`,
-which the dashboard's "Streaming monitor" tab reads.
+| | |
+|---|---|
+| **26 passing tests** | Feature layer, data validation, model wrapper, all four algorithms, FastAPI endpoints via `TestClient`. No Kafka or Spark needed, so they run anywhere and in CI. |
+| **CI** | ruff + black + pytest on Python 3.10 / 3.11 / 3.12, every push. |
+| **Config-driven** | One `config.yaml`, env-var overridable. No magic numbers scattered through the code. |
+| **Containerised** | Whole Kafka + Spark pipeline in one command. |
+| **Graceful degradation** | No Kaggle account? A synthetic generator with the same schema and fraud dynamics means a fresh clone runs end to end. |
+| **Executor-side model cache** | The Spark UDF loads the model once per executor, not once per micro-batch. |
 
-```bash
-docker compose -f docker-compose.streaming.yml up --build
-```
+### A note on the synthetic fallback
 
-Wait for `=== DONE ... ===`, then start (or refresh) the dashboard and open the
-**Streaming monitor** tab:
+The synthetic generator produces **ROC-AUC 1.0000** — perfect precision, perfect recall, zero errors.
+That is not a good result; it means the generator encodes the fraud rule so cleanly that the classes
+separate trivially. It is useful for smoke-testing the pipeline and worthless as a measure of the
+model.
 
-```bash
-streamlit run fraud_platform/dashboard/app.py
-```
-
-Stop Kafka when finished: `docker compose -f docker-compose.streaming.yml down`.
-
-### Manual: run each stage yourself (needs local Java 8/11/17)
-
-```bash
-# 1. Start Kafka
-make kafka-up                # docker compose up -d zookeeper kafka
-
-# 2. Start the Spark scorer (Kafka -> model -> Kafka + parquet)
-make stream                  # python -m fraud_platform.streaming.spark_stream
-#   process the backlog once and exit: python -m fraud_platform.streaming.spark_stream --available-now
-#   quick look without sinks:          python -m fraud_platform.streaming.spark_stream --console
-
-# 3. Replay PaySim as a live feed (throttled to N tx/s)
-make producer                # python -m fraud_platform.streaming.producer
-
-# 4. Watch the dashboard's "Streaming monitor" tab fill up
-make dashboard
-```
-
-Everything (API + dashboard + Kafka) can also run in containers:
-
-```bash
-docker compose up --build
-```
+Every number in this README comes from the real 6.3M-row dataset. A perfect score is a red flag, not
+an achievement.
 
 ---
 
 ## Project layout
 
 ```
-pyproject.toml                Packaging, deps, entry points, tool config
-config/config.yaml            Central config (env-var overridable)
-scripts/                      Data download, HTML report, pipeline runner
 fraud_platform/
-  config.py                   Config loader with attribute access + env overrides
-  logging_config.py           Central logging setup
-  data/                       Synthetic PaySim generator + schema validation
-  features/engineering.py     Shared feature engineering (train == serve)
-  training/train.py           Train + evaluate + persist the model
+  config.py                   Config loader, env-var overrides
+  data/                       Synthetic generator + schema validation
+  features/engineering.py     Single source of truth for features
+  training/train.py           Train, evaluate, persist
   serving/
-    model.py                  Model load + scoring wrapper (used by API & Spark)
+    model.py                  Model wrapper — used by API and Spark alike
     app.py                    FastAPI scoring service
-    schemas.py                Pydantic request/response models
   streaming/
     producer.py               Kafka producer replaying PaySim
     spark_stream.py           Spark Structured Streaming scorer (pandas_udf)
   dashboard/app.py            Streamlit dashboard
-tests/                        pytest suite (features, data, training, API, config)
-docs/architecture.md          Architecture & design decisions
-docker-compose.yml            Kafka + API + dashboard
-docker-compose.streaming.yml  One-command Kafka + Spark streaming pipeline
-Dockerfile                    App image (Python + JRE for PySpark)
-.github/workflows/ci.yml      CI: ruff + black + pytest (Py 3.10–3.12)
+tests/                        26 tests
+config/config.yaml            Central config
+docker-compose.streaming.yml  One-command Kafka + Spark pipeline
+.github/workflows/ci.yml      CI: ruff + black + pytest
+notebooks/eda.ipynb           Exploratory analysis
 ```
 
----
+## Model options
 
-## Model & features
+`random_forest` (default), `xgboost` (with `scale_pos_weight` for the imbalance),
+`gradient_boosting`, `logistic` — selectable via `fraud-train --algorithm`.
 
-The model (default: `RandomForestClassifier` with balanced class weights; also
-`xgboost` — with `scale_pos_weight` for the class imbalance — plus
-`gradient_boosting` / `logistic`, selectable via `fraud-train --algorithm`) is
-trained only on the fraud-eligible `TRANSFER` / `CASH_OUT` transactions.
-Engineered features:
+## Stack
 
-| Feature | Meaning |
-|---|---|
-| `amount` | Transaction amount |
-| `oldbalanceOrg`, `newbalanceOrig` | Origin balance before / after |
-| `oldbalanceDest`, `newbalanceDest` | Destination balance before / after |
-| `errorBalanceOrig` | `newbalanceOrig + amount − oldbalanceOrg` (0 when consistent) |
-| `errorBalanceDest` | `oldbalanceDest + amount − newbalanceDest` |
-| `amount_to_oldOrg` | Amount relative to origin balance |
-| `orig_zeroed_out` | Origin account fully drained |
-| `dest_is_merchant` | Destination is a merchant (`M…`) account |
-| `type_TRANSFER`, `type_CASH_OUT` | Transaction-type one-hots |
+Python · scikit-learn · XGBoost · Apache Kafka · Apache Spark (Structured Streaming) ·
+FastAPI · Streamlit · Docker · pytest · GitHub Actions
 
-Training logs and stores (in `models/model_metadata.json`) ROC-AUC, PR-AUC, fraud
-precision/recall/F1, the confusion matrix, and feature importances.
+## Data
 
----
+[PaySim](https://www.kaggle.com/datasets/ealaxi/paysim1) — a 6.3M-row simulation of mobile-money
+transactions built from real African mobile-money logs, with labelled fraud. Real fraud data is
+confidential; this is the closest public proxy.
 
-## Exploratory analysis
-
-`notebooks/eda.ipynb` explores the PaySim fraud signal (class imbalance,
-fraud-by-type, amount distributions, the balance-error separation, and the
-account-drained signature). It renders with charts on GitHub, and re-runs on the
-real dataset when `data/paysim.csv` is present:
-
-```bash
-jupyter nbconvert --to notebook --execute --inplace notebooks/eda.ipynb
-```
-
-## Testing
-
-```bash
-make test        # or: pytest
-```
-
-The suite trains a small model on synthetic data and exercises the feature layer, the
-model wrapper, and the FastAPI endpoints via `TestClient` — no Kafka or Spark required,
-so it runs anywhere (and in CI on every push).
-
----
-
-## Configuration
-
-Everything is driven by `config/config.yaml`, with env-var overrides for deployment
-(see `.env.example`): `KAFKA_BOOTSTRAP_SERVERS`, `MODEL_PATH`, `SERVING_PORT`,
-`DASHBOARD_API_URL`, `KAFKA_INPUT_TOPIC`, `KAFKA_OUTPUT_TOPIC`, and more.
