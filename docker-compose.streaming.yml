@@ -1,0 +1,52 @@
+# One-command streaming pipeline — runs Kafka + the Spark scorer entirely in
+# Linux containers, so no local Java / Spark / winutils setup is needed.
+#
+#   docker compose -f docker-compose.streaming.yml up --build
+#
+# It produces transactions into Kafka, scores them with Spark, and writes the
+# results into ./data/scored (mounted), which the local Streamlit dashboard's
+# "Streaming monitor" tab reads. The `pipeline` container exits when done; Kafka
+# keeps running (stop it with `docker compose -f docker-compose.streaming.yml down`).
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: fraud-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      # PLAINTEXT (kafka:29092) for other containers; PLAINTEXT_HOST (localhost:9092) for the host.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  pipeline:
+    build: .
+    container_name: fraud-pipeline
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PRODUCE_LIMIT: "30000"
+      PRODUCE_RATE: "5000"
+    volumes:
+      # Share data + models with the host so the local dashboard sees the output
+      # and the container reuses your locally-trained model.
+      - ./data:/app/data
+      - ./models:/app/models
+    command: ["bash", "scripts/run_streaming_pipeline.sh"]
